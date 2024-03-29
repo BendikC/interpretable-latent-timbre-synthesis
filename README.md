@@ -20,7 +20,7 @@ https://www.anaconda.com/distribution/
 - Create a new python 3.7 environment
 Please open your terminal (Anaconda Command Prompt for Windows),
 
-`conda create -n lts python=3.11`
+`conda create -n lts python=3.7`
 
 - Activate your conda environment before continuing the following steps:
 
@@ -37,9 +37,9 @@ We will install tensorflow using conda. If you have an NVIDIA GPU, please follow
 
 - Install tensorflow using pip:
   - GPU version
-    `pip install tensorflow-gpu`
-  - CPU version
-    `pip install tensorflow`
+    `conda install tensorflow-gpu=2.6`
+  - CPU version (not tested yet)
+    `conda install tensorflow`
 
 3- Python Libraries
 
