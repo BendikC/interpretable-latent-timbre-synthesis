@@ -35,20 +35,15 @@ We will install tensorflow using conda. If you have an NVIDIA GPU, please follow
 
 - Open your terminal (Anaconda Command Prompt for Windows),
 
-- Install tensorflow using conda:
-    - with GPU:
+- Install tensorflow using pip:
     
-    `conda install tensorflow-gpu=2.0.0`
-
-    - only CPU:
-    
-    `conda install tensorflow=2.0.0`
+    `pip install tensorflow`
 
 3- Python Libraries
 
 - Install librosa for audio feature extraction
 
-`pip install librosa`
+`pip install librosa==0.9`
 
 
 For using the interpolate_two app
