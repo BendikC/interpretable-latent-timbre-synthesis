@@ -98,6 +98,9 @@ def main():
             vae.decoder.summary()
         
         print("\n=== Full VAE Summary ===")
+        if not vae.built:
+            dummy_input = tf.zeros((1, config.n_bins))
+            _ = vae(dummy_input)
         vae.summary()
         
         # Create model plots if requested

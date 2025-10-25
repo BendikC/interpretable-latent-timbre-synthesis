@@ -4,7 +4,6 @@
 import tensorflow as tf
 from tensorflow.keras import layers
 from tensorflow.keras import backend as K
-from tensorflow.keras import ops
 from audio_features import compute_features_from_cqt_batch, compute_attack_time_tf, compute_spectral_centroid_tf
 
 
