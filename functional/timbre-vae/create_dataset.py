@@ -34,7 +34,7 @@ n_iter=config['audio'].getint('n_iter')
 #dataset
 dataset = config['dataset'].get('datapath')
 cqt_dataset = config['dataset'].get('cqt_dataset')
-my_cqt = os.path.join(dataset, cqt_dataset)
+my_cqt = cqt_dataset
 os.makedirs(my_cqt,exist_ok=True)
 my_audio_folder = dataset + '/audio'
 pbar = len(os.listdir(my_audio_folder))
