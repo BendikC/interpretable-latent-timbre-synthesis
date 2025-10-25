@@ -3,6 +3,8 @@
 
 import tensorflow as tf
 from tensorflow.keras import layers
+from tensorflow.keras import backend as K
+from tensorflow.keras import ops
 from audio_features import compute_features_from_cqt_batch, compute_attack_time_tf, compute_spectral_centroid_tf
 
 
@@ -193,38 +195,50 @@ def create_vae_model(config):
     
     return vae
 
-
 def create_simple_vae_model(config):
     """
     Create a simple VAE model that matches the original train.py implementation.
-    Uses standard Keras training (no custom train_step).
+    Uses a custom Model subclass for simplicity with modern Keras.
     """
     
-    # Define encoder model (exactly like original)
+    class SimpleVAE(tf.keras.Model):
+        def __init__(self, encoder, decoder, kl_beta):
+            super(SimpleVAE, self).__init__()
+            self.encoder_model = encoder
+            self.decoder_model = decoder
+            self.kl_beta = kl_beta
+            
+        def call(self, inputs):
+            z_mean, z_log_var, z = self.encoder_model(inputs)
+            reconstruction = self.decoder_model(z)
+            
+            # Add KL loss
+            kl_loss = -0.5 * tf.reduce_mean(
+                z_log_var - tf.square(z_mean) - tf.exp(z_log_var) + 1
+            )
+            self.add_loss(self.kl_beta * kl_loss)
+            
+            return reconstruction
+    
+    # Build encoder that returns mean, log_var, and sample
     original_dim = config.n_bins
     original_inputs = tf.keras.Input(shape=(original_dim,), name='encoder_input')
     x = layers.Dense(config.n_units, activation='relu')(original_inputs)
     z_mean = layers.Dense(config.latent_dim, name='z_mean')(x)
     z_log_var = layers.Dense(config.latent_dim, name='z_log_var')(x)
     z = Sampling()((z_mean, z_log_var))
-    encoder = tf.keras.Model(inputs=original_inputs, outputs=z, name='encoder')
+    encoder = tf.keras.Model(inputs=original_inputs, outputs=[z_mean, z_log_var, z], name='encoder')
     
-    # Define decoder model (exactly like original)
+    # Build decoder
     latent_inputs = tf.keras.Input(shape=(config.latent_dim,), name='z_sampling')
     x = layers.Dense(config.n_units, activation='relu')(latent_inputs)
     outputs = layers.Dense(original_dim, activation=config.VAE_output_activation)(x)
     decoder = tf.keras.Model(inputs=latent_inputs, outputs=outputs, name='decoder')
     
-    # Connect encoder and decoder
-    outputs = decoder(z)
-    vae = tf.keras.Model(inputs=original_inputs, outputs=outputs, name='vae')
+    # Create VAE
+    vae = SimpleVAE(encoder, decoder, config.kl_beta)
     
-    # Add KL divergence loss (exactly like original)
-    kl_loss = -config.kl_beta * tf.reduce_mean(
-        z_log_var - tf.square(z_mean) - tf.exp(z_log_var) + 1)
-    vae.add_loss(kl_loss)
-    
-    # Store encoder and decoder as attributes for compatibility
+    # Store for compatibility
     vae.encoder = encoder
     vae.decoder = decoder
     

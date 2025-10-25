@@ -88,8 +88,7 @@ def create_training_callbacks(config, model_dir, log_dir):
             filepath=str(modelpath),
             save_best_only=config.save_best_only,
             monitor='loss',
-            verbose=1,
-            save_weights_only=True ## TODO: look into if I should change this back to False
+            verbose=1
         ),         
         tf.keras.callbacks.EarlyStopping(
             monitor='loss',

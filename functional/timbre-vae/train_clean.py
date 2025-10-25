@@ -159,12 +159,14 @@ def main():
     else:
         print("Using standard VAE training (like original train.py)")
         
-        # Train exactly like the original train.py
+        dataset = tf.data.Dataset.from_tensor_slices((training_array, training_array))
+        dataset = dataset.shuffle(len(training_array))
+        dataset = dataset.batch(config.batch_size)
+        dataset = dataset.prefetch(tf.data.AUTOTUNE)
+
         history = vae.fit(
-            training_array, 
-            training_array,  # VAE reconstructs its input
+            dataset,
             epochs=config.epochs, 
-            batch_size=config.batch_size, 
             callbacks=callbacks,
             verbose=1
         )
