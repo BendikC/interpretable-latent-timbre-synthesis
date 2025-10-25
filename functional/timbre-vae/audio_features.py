@@ -4,40 +4,54 @@
 import numpy as np
 import tensorflow as tf
 
-def compute_spectral_centroid_tf(cqt_magnitude):
-    """Compute spectral centroid using pure TensorFlow operations."""
+def compute_spectral_centroid_tf(cqt_magnitude, fmin=32.7, bins_per_octave=48):
+    """Compute spectral centroid using proper frequency mapping."""
     # cqt_magnitude shape: [batch_size, n_bins]
     
-    # Create frequency bins (approximate, you may need to adjust based on your CQT setup)
     n_bins = tf.shape(cqt_magnitude)[1]
-    freq_bins = tf.cast(tf.range(n_bins), tf.float32)
-    freq_bins = tf.expand_dims(freq_bins, 0)  # [1, n_bins]
+    bin_indices = tf.cast(tf.range(n_bins), tf.float32)
     
-    # Weighted sum of frequencies
-    weighted_freq = tf.reduce_sum(cqt_magnitude * freq_bins, axis=1)  # [batch_size]
-    total_magnitude = tf.reduce_sum(cqt_magnitude, axis=1)  # [batch_size]
+    # Convert bin indices to actual frequencies (Hz)
+    frequencies = fmin * tf.pow(2.0, bin_indices / bins_per_octave)
+    frequencies = tf.expand_dims(frequencies, 0)  # [1, n_bins]
     
-    # Avoid division by zero
-    centroid = weighted_freq / (total_magnitude + 1e-8)
-    return centroid
+    # Compute centroid using real frequencies
+    weighted_freq = tf.reduce_sum(cqt_magnitude * frequencies, axis=1)
+    total_magnitude = tf.reduce_sum(cqt_magnitude, axis=1)
+    centroid_hz = weighted_freq / (total_magnitude + 1e-8)
+    
+    # Normalize to 0-1 range for training stability
+    fmax = fmin * tf.pow(2.0, tf.cast(n_bins, tf.float32) / bins_per_octave)
+    centroid_normalized = tf.math.log(centroid_hz / fmin) / tf.math.log(fmax / fmin)
+    
+    return centroid_normalized
 
 def compute_attack_time_tf(cqt_magnitude):
-    """Compute attack time using pure TensorFlow operations."""
-    # Simple approximation: find the frame with maximum energy
-    # This is a simplified version - you might want a more sophisticated approach
+    """Compute attack sharpness proxy from single CQT frames."""
+    # For single frames, we can't measure true attack time
+    # Instead, measure "spectral sharpness" - concentrated energy = sharper attack
     
-    # Sum across frequency bins to get energy per frame
-    energy_per_frame = tf.reduce_sum(cqt_magnitude, axis=1)  # [batch_size]
+    # Compute spectral spread (inverse of sharpness)
+    centroid = compute_spectral_centroid_tf(cqt_magnitude)
     
-    # For simplicity, use the position of maximum energy as attack time proxy
-    max_positions = tf.cast(tf.argmax(energy_per_frame, axis=0), tf.float32)
+    n_bins = tf.shape(cqt_magnitude)[1]
+    bin_indices = tf.cast(tf.range(n_bins), tf.float32) / tf.cast(n_bins, tf.float32)
+    bin_indices = tf.expand_dims(bin_indices, 0)  # [1, n_bins]
     
-    # If you have multiple samples in batch, you might want to process differently
-    # This is a simplified version
-    batch_size = tf.shape(cqt_magnitude)[0]
-    attack_times = tf.fill([batch_size], max_positions)
+    # Compute spectral spread around centroid
+    centroid_expanded = tf.expand_dims(centroid, 1)  # [batch_size, 1]
+    spread = tf.reduce_sum(cqt_magnitude * tf.square(bin_indices - centroid_expanded), axis=1)
+    total_magnitude = tf.reduce_sum(cqt_magnitude, axis=1)
+    spectral_spread = spread / (total_magnitude + 1e-8)
     
-    return attack_times
+    # Invert spread to get sharpness (lower spread = sharper attack)
+    attack_sharpness = 1.0 / (1.0 + spectral_spread * 10.0)  # Scale factor for range
+    
+    # DEBUG PRINTS
+    tf.print("Attack sharpness - min:", tf.reduce_min(attack_sharpness), 
+             "max:", tf.reduce_max(attack_sharpness), "mean:", tf.reduce_mean(attack_sharpness))
+    
+    return attack_sharpness
 
 
 def compute_attack_time(cqt_magnitude):
