@@ -17,7 +17,7 @@ import os
 
 # Local imports
 from config import TrainingConfig
-from data_utils import load_cqt_dataset, setup_workspace, create_training_callbacks, create_optimizer
+from data_utils import load_cqt_dataset, setup_workspace, create_training_callbacks, create_optimizer, check_gpu_availability
 from models import create_vae_model, save_model_plots, Sampling, create_simple_vae_model
 from evaluation import generate_audio_examples, generate_loss_plot, save_training_results
 
@@ -48,18 +48,7 @@ def load_existing_model(config, workdir, use_custom_loss):
 def main():
     """Main training pipeline."""
 
-    # Enable memory growth for GPUs
-    gpus = tf.config.experimental.list_physical_devices('GPU')
-    if gpus:
-        try:
-            # Currently, memory growth needs to be the same across GPUs
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            logical_gpus = tf.config.experimental.list_logical_devices('GPU')
-            print(len(gpus), "Physical GPUs,", len(logical_gpus), "Logical GPUs")
-        except RuntimeError as e:
-            # Memory growth must be set before GPUs have been initialized
-            print(e)
+    check_gpu_availability()
 
     # Parse arguments and load configuration
     args = parse_arguments()

@@ -5,6 +5,46 @@ import numpy as np
 import os
 from pathlib import Path
 
+def check_gpu_availability():
+    """Check if GPU is available and print device information.
+    
+    Returns:
+        bool: True if GPU is available, False otherwise
+    """
+    import tensorflow as tf
+    
+    print("\n=== GPU Availability Check ===")
+    
+    # List physical devices
+    gpus = tf.config.list_physical_devices('GPU')
+    cpus = tf.config.list_physical_devices('CPU')
+    
+    print(f"CPUs Available: {len(cpus)}")
+    print(f"GPUs Available: {len(gpus)}")
+
+    if gpus:
+        print("\nGPU Details:")
+        for i, gpu in enumerate(gpus):
+            print(f"  GPU {i}: {gpu.name}")
+            # Try to get memory info if available
+            try:
+                gpu_details = tf.config.experimental.get_device_details(gpu)
+                if gpu_details:
+                    print(f"    Details: {gpu_details}")
+            except:
+                pass
+        
+        # Check if TensorFlow is actually built with CUDA
+        print(f"\nTensorFlow built with CUDA: {tf.test.is_built_with_cuda()}")
+        print(f"GPU available for TensorFlow: {tf.test.is_gpu_available()}")
+        
+        print("\n✓ GPU will be used for training")
+        return True
+    else:
+        print("\n⚠ No GPU detected. Training will use CPU (slower)")
+        return False
+
+
 
 def load_cqt_dataset(cqt_path):
     """Load all CQT files from directory and concatenate.
