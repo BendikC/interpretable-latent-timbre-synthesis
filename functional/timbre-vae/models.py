@@ -63,7 +63,8 @@ class AudioFeatureVAE(tf.keras.Model):
     """VAE with audio feature preservation losses."""
     
     def __init__(self, encoder, decoder, kl_beta=1.0, 
-                 attack_time_weight=0.1, spectral_centroid_weight=0.1, **kwargs):
+                 attack_time_weight=0.1, spectral_centroid_weight=0.1,
+                 centroid_dim=0, disentangle_weight=1.0, **kwargs):
         super(AudioFeatureVAE, self).__init__(**kwargs)
         self.encoder = encoder
         self.decoder = decoder
@@ -71,6 +72,9 @@ class AudioFeatureVAE(tf.keras.Model):
         self.attack_time_weight = attack_time_weight
         self.spectral_centroid_weight = spectral_centroid_weight
         self.sampling_layer = Sampling()
+
+        self.centroid_dim = centroid_dim  # Which latent dimension controls centroid
+        self.disentangle_weight = disentangle_weight
         
         # Metrics trackers
         self.total_loss_tracker = tf.keras.metrics.Mean(name="total_loss")
@@ -78,6 +82,7 @@ class AudioFeatureVAE(tf.keras.Model):
         self.kl_loss_tracker = tf.keras.metrics.Mean(name="kl_loss")
         self.attack_loss_tracker = tf.keras.metrics.Mean(name="attack_loss")
         self.centroid_loss_tracker = tf.keras.metrics.Mean(name="centroid_loss")
+        self.disentangle_loss_tracker = tf.keras.metrics.Mean(name="disentangle_loss")
 
     @property
     def metrics(self):
@@ -87,6 +92,7 @@ class AudioFeatureVAE(tf.keras.Model):
             self.kl_loss_tracker,
             self.attack_loss_tracker,
             self.centroid_loss_tracker,
+            self.disentangle_loss_tracker,
         ]
 
     def call(self, inputs, training=None):
@@ -127,15 +133,25 @@ class AudioFeatureVAE(tf.keras.Model):
             output_centroid = compute_spectral_centroid_tf(reconstruction)
             centroid_loss = tf.reduce_mean(tf.square(input_centroid - output_centroid))
             
-            # input_attack = compute_attack_time_tf(data)
-            # output_attack = compute_attack_time_tf(reconstruction)
-            # attack_loss = tf.reduce_mean(tf.square(input_attack - output_attack))
+            # NEW: Disentanglement loss - force centroid_dim to predict centroid
+            # Extract the specific latent dimension
+            z_centroid_dim = z[:, self.centroid_dim:self.centroid_dim+1]  # [batch, 1]
+            
+            # Normalize it to [0, 1] using tanh (maps [-inf, inf] to [-1, 1])
+            # then scale to [0, 1]
+            predicted_centroid = (tf.nn.tanh(z_centroid_dim) + 1.0) / 2.0
+            predicted_centroid = tf.squeeze(predicted_centroid, axis=1)  # [batch]
+            
+            # Loss: the latent dimension should predict the input centroid
+            disentangle_loss = tf.reduce_mean(
+                tf.square(predicted_centroid - input_centroid)
+            )
             
             # Total loss
             total_loss = (reconstruction_loss + 
                          self.kl_beta * kl_loss + 
-                        #  self.attack_time_weight * attack_loss + 
-                         self.spectral_centroid_weight * centroid_loss)
+                         self.spectral_centroid_weight * centroid_loss + 
+                         self.disentangle_weight * disentangle_loss)
         
         # Compute gradients and update weights (now this will work!)
         grads = tape.gradient(total_loss, self.trainable_weights)
@@ -145,15 +161,15 @@ class AudioFeatureVAE(tf.keras.Model):
         self.total_loss_tracker.update_state(total_loss)
         self.reconstruction_loss_tracker.update_state(reconstruction_loss)
         self.kl_loss_tracker.update_state(kl_loss)
-        # self.attack_loss_tracker.update_state(attack_loss)
         self.centroid_loss_tracker.update_state(centroid_loss)
+        self.disentangle_loss_tracker.update_state(disentangle_loss)
         
         return {
             "loss": self.total_loss_tracker.result(),
             "reconstruction_loss": self.reconstruction_loss_tracker.result(),
             "kl_loss": self.kl_loss_tracker.result(),
-            # "attack_loss": self.attack_loss_tracker.result(),
             "centroid_loss": self.centroid_loss_tracker.result(),
+            "disentangle_loss": self.disentangle_loss_tracker.result(),
         }
 
 def create_vae_model(config):
@@ -178,6 +194,10 @@ def create_vae_model(config):
         n_units=config.n_units,
         output_activation=config.VAE_output_activation
     )
+
+    # NEW: Get disentanglement parameters from config
+    centroid_dim = getattr(config, 'centroid_dim', 0)  # Default to first dimension
+    disentangle_weight = getattr(config, 'disentangle_weight', 1.0)
     
     # Create VAE
     vae = AudioFeatureVAE(
@@ -185,7 +205,9 @@ def create_vae_model(config):
         decoder=decoder,
         kl_beta=config.kl_beta,
         attack_time_weight=config.attack_time_weight,
-        spectral_centroid_weight=config.spectral_centroid_weight
+        spectral_centroid_weight=config.spectral_centroid_weight,
+        disentangle_weight=disentangle_weight,
+        centroid_dim=centroid_dim
     )
 
     # Build the model by calling it with dummy data
