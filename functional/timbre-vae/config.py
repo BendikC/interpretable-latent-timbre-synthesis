@@ -38,23 +38,35 @@ class TrainingConfig:
     
     def _load_dataset_config(self):
         """Load dataset parameters."""
-        self.dataset_path = Path(self.config['dataset'].get('datapath'))
-        if not self.dataset_path.exists():
-            raise FileNotFoundError(self.dataset_path.resolve())
+        # Audio dataset path (for reading raw audio files)
+        audio_dataset_str = self.config['dataset'].get('audio_dataset')
+        self.audio_dataset = Path(audio_dataset_str) if audio_dataset_str else None
+        if self.audio_dataset and not self.audio_dataset.exists():
+            print(f"Warning: Audio dataset path does not exist: {self.audio_dataset}")
         
-        self.cqt_dataset = self.config['dataset'].get('cqt_dataset')
+        # CQT dataset path (for reading preprocessed CQT .npy files)
+        cqt_dataset_str = self.config['dataset'].get('cqt_dataset')
+        if not cqt_dataset_str:
+            raise ValueError("cqt_dataset must be specified in config")
+        self.cqt_dataset = Path(cqt_dataset_str)
+        if not self.cqt_dataset.exists():
+            raise FileNotFoundError(f"CQT dataset not found: {self.cqt_dataset.resolve()}")
+        
+        # Output directory (for saving models, logs, results)
+        output_dir_str = self.config['dataset'].get('output_dir')
+        if not output_dir_str:
+            raise ValueError("output_dir must be specified in config")
+        self.output_dir = Path(output_dir_str)
+        
+        # Legacy compatibility: keep these aliases
+        self.my_cqt = self.cqt_dataset
+        self.my_audio = self.audio_dataset
+        
+        # Run configuration
         self.run_number = self.config['dataset'].getint('run_number')
-        self.my_cqt = self.dataset_path / self.cqt_dataset
-        self.my_audio = self.dataset_path / 'audio'
         
-        if not self.my_cqt.exists():
-            raise FileNotFoundError(self.my_cqt.resolve())
-        
-        # Workspace handling
-        if self.config['dataset'].get('workspace') is not None:
-            self.workspace = Path(self.config['dataset'].get('workspace'))
-        else:
-            self.workspace = None
+        # Workspace handling (legacy - now derived from output_dir + description)
+        self.workspace = None
     
     def _load_training_config(self):
         """Load training parameters."""
@@ -81,9 +93,13 @@ class TrainingConfig:
         self.batch_normalization = self.config['VAE'].getboolean('batch_norm')
         self.VAE_output_activation = self.config['VAE'].get('output_activation')
         
+        # Disentanglement parameters
+        self.centroid_dim = self.config['VAE'].getint('centroid_dim', fallback=0)
+        self.disentangle_weight = self.config['VAE'].getfloat('disentangle_weight', fallback=1.0)
+        
         # Audio feature loss weights
-        self.attack_time_weight = self.config['VAE'].getfloat('attack_time_weight') if self.config.has_option('VAE', 'attack_time_weight') else 0.1
-        self.spectral_centroid_weight = self.config['VAE'].getfloat('spectral_centroid_weight') if self.config.has_option('VAE', 'spectral_centroid_weight') else 0.1
+        self.attack_time_weight = self.config['VAE'].getfloat('attack_time_weight', fallback=0.1)
+        self.spectral_centroid_weight = self.config['VAE'].getfloat('spectral_centroid_weight', fallback=0.1)
     
     def _load_extra_config(self):
         """Load miscellaneous parameters."""
@@ -95,7 +111,7 @@ class TrainingConfig:
     def update_workspace(self, workspace_path):
         """Update workspace path in config."""
         self.workspace = workspace_path
-        self.config['dataset']['workspace'] = str(workspace_path.resolve())
+        # Don't update the config object - workspace is now derived, not configured
     
     def save_config(self, config_path):
         """Save current configuration to file."""

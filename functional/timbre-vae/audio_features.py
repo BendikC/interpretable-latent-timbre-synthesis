@@ -6,21 +6,28 @@ import tensorflow as tf
 
 def compute_spectral_centroid_tf(cqt_magnitude, fmin=32.7, bins_per_octave=48):
     """Compute spectral centroid using proper frequency mapping."""
-    # cqt_magnitude shape: [batch_size, n_bins]
-    
+    # first we get the number of bins, and we define the indices as floats
     n_bins = tf.shape(cqt_magnitude)[1]
     bin_indices = tf.cast(tf.range(n_bins), tf.float32)
     
-    # Convert bin indices to actual frequencies (Hz)
+    # cqt bins are logarithmically spaced
+    # this means that frequency for each bin is:
+    # f = fmin * 2^(bin_index / bins_per_octave)
     frequencies = fmin * tf.pow(2.0, bin_indices / bins_per_octave)
-    frequencies = tf.expand_dims(frequencies, 0)  # [1, n_bins]
+
+    # we expand the dims to match the batch size
+    frequencies = tf.expand_dims(frequencies, 0)
     
-    # Compute centroid using real frequencies
+    # we compute the sum of frequency * magnitude
     weighted_freq = tf.reduce_sum(cqt_magnitude * frequencies, axis=1)
+
+    # then we compute the total magnitude
     total_magnitude = tf.reduce_sum(cqt_magnitude, axis=1)
+
+    # spectral centroid = weighted frequency sum / total magnitude
     centroid_hz = weighted_freq / (total_magnitude + 1e-8)
     
-    # Normalize to 0-1 range for training stability
+    # we normalize to [0, 1] based on fmin and fmax
     fmax = fmin * tf.pow(2.0, tf.cast(n_bins, tf.float32) / bins_per_octave)
     centroid_normalized = tf.math.log(centroid_hz / fmin) / tf.math.log(fmax / fmin)
     

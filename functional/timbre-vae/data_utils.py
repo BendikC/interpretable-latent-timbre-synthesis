@@ -45,7 +45,6 @@ def check_gpu_availability():
         return False
 
 
-
 def load_cqt_dataset(cqt_path):
     """Load all CQT files from directory and concatenate.
     
@@ -89,9 +88,10 @@ def setup_workspace(config):
         run_id = config.run_number
         while True:
             try:
-                my_runs = config.dataset_path / config.description
+                # Use output_dir + description instead of dataset_path
+                runs_dir = config.output_dir / config.description
                 run_name = f'run-{run_id:03d}'
-                workdir = my_runs / run_name 
+                workdir = runs_dir / run_name 
                 os.makedirs(workdir)
                 break
             except OSError:
@@ -102,6 +102,9 @@ def setup_workspace(config):
         
         config.update_workspace(workdir)
     else:
+        # For continued training, workspace must be explicitly set
+        if config.workspace is None:
+            raise ValueError("workspace must be set for continue_training=True")
         workdir = Path(config.workspace)
 
     print(f"Workspace: {workdir}")
@@ -121,12 +124,13 @@ def create_training_callbacks(config, model_dir, log_dir):
     """
     import tensorflow as tf
     
-    modelpath = model_dir / 'mymodel_last.h5'
+    modelpath = model_dir / 'mymodel_last.weights.h5'
     
     callbacks = [
         tf.keras.callbacks.ModelCheckpoint(
             filepath=str(modelpath),
             save_best_only=config.save_best_only,
+            save_weights_only=True,
             monitor='loss',
             verbose=1
         ),         
