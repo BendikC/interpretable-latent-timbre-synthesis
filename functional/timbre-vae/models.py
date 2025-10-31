@@ -124,7 +124,7 @@ class AudioFeatureVAE(tf.keras.Model):
             )
             
             # KL divergence loss
-            kl_loss = -0.5 * tf.reduce_mean(
+            kl_loss = 0.5 * tf.reduce_mean(
                 z_log_var - tf.square(z_mean) - tf.exp(z_log_var) + 1
             )
 
@@ -133,19 +133,23 @@ class AudioFeatureVAE(tf.keras.Model):
             output_centroid = compute_spectral_centroid_tf(reconstruction)
             centroid_loss = tf.reduce_mean(tf.square(input_centroid - output_centroid))
             
-            # NEW: Disentanglement loss - force centroid_dim to predict centroid
-            # Extract the specific latent dimension
-            z_centroid_dim = z[:, self.centroid_dim:self.centroid_dim+1]  # [batch, 1]
+            # IMPROVED: Disentanglement loss with better scaling
+            z_centroid_dim = z[:, self.centroid_dim:self.centroid_dim+1]
             
-            # Normalize it to [0, 1] using tanh (maps [-inf, inf] to [-1, 1])
-            # then scale to [0, 1]
-            predicted_centroid = (tf.nn.tanh(z_centroid_dim) + 1.0) / 2.0
-            predicted_centroid = tf.squeeze(predicted_centroid, axis=1)  # [batch]
+            # Use sigmoid instead of tanh for better stability
+            # Sigmoid naturally maps to [0, 1]
+            predicted_centroid = tf.nn.sigmoid(z_centroid_dim)
+            predicted_centroid = tf.squeeze(predicted_centroid, axis=1)
             
-            # Loss: the latent dimension should predict the input centroid
+            # Loss with stability epsilon
             disentangle_loss = tf.reduce_mean(
-                tf.square(predicted_centroid - input_centroid)
+                tf.square(predicted_centroid - input_centroid) + 1e-8
             )
+
+            tf.debugging.check_numerics(reconstruction_loss, "reconstruction_loss")
+            tf.debugging.check_numerics(kl_loss, "kl_loss")
+            tf.debugging.check_numerics(centroid_loss, "centroid_loss")
+            tf.debugging.check_numerics(disentangle_loss, "disentangle_loss")
             
             # Total loss
             total_loss = (reconstruction_loss + 
@@ -234,7 +238,7 @@ def create_simple_vae_model(config):
             reconstruction = self.decoder_model(z)
             
             # Add KL loss
-            kl_loss = -0.5 * tf.reduce_mean(
+            kl_loss = 0.5 * tf.reduce_mean(
                 z_log_var - tf.square(z_mean) - tf.exp(z_log_var) + 1
             )
             self.add_loss(self.kl_beta * kl_loss)

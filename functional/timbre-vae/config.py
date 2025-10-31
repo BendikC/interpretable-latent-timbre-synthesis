@@ -26,6 +26,7 @@ class TrainingConfig:
         self._load_training_config()
         self._load_model_config()
         self._load_extra_config()
+        self._load_analysis_config()
     
     def _load_audio_config(self):
         """Load audio processing parameters."""
@@ -107,6 +108,14 @@ class TrainingConfig:
         self.normalize_examples = self.config['extra'].getboolean('normalize_examples')
         self.plot_model = self.config['extra'].getboolean('plot_model')
         self.description = self.config['extra'].get('description')
+
+    def _load_analysis_config(self):
+        """Load analysis parameters."""
+        self.model_weights = self.config['analysis'].get('model_weights')
+        self.model_weights = Path(self.model_weights)
+        self.output_dir_analysis = self.config['analysis'].get('output_dir')
+        self.output_dir_analysis = Path(self.output_dir_analysis)
+        
     
     def update_workspace(self, workspace_path):
         """Update workspace path in config."""
