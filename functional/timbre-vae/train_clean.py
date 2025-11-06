@@ -17,7 +17,7 @@ import os
 
 # Local imports
 from config import TrainingConfig
-from data_utils import load_cqt_dataset, setup_workspace, create_training_callbacks, create_optimizer, check_gpu_availability
+from data_utils import load_cqt_dataset, save_model_weights, setup_workspace, create_training_callbacks, create_optimizer, check_gpu_availability
 from models import create_vae_model, save_model_plots, Sampling, create_simple_vae_model
 from evaluation import generate_audio_examples, generate_loss_plot, save_training_results
 
@@ -122,7 +122,7 @@ def main():
         vae = load_existing_model(config, workdir, args.use_custom_loss)
     
     # Create training callbacks
-    callbacks = create_training_callbacks(config, model_dir, log_dir)
+    callbacks = create_training_callbacks(config, model_dir, log_dir, vae=vae)
     
     # Train the model
     print(f"\n=== Starting Training ===")
@@ -165,6 +165,9 @@ def main():
     
     # Record end time
     end_time = time.time()
+
+    print("\n=== Saving Final Model ===")
+    save_model_weights(vae, model_dir, save_separate=True)
     
     # Save training results
     save_training_results(history, config, workdir, start_time, end_time)

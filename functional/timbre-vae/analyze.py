@@ -20,6 +20,7 @@ from analysis.visualization import (
     plot_latent_traversal
 )
 from audio_features import compute_spectral_centroid_tf
+from data_utils import load_model_weights
 
 
 def parse_arguments():
@@ -29,6 +30,8 @@ def parse_arguments():
     parser.add_argument('--use-custom-loss', action='store_true',
                        help='Model was trained with custom loss')
     return parser.parse_args()
+
+
 
 
 def load_trained_model(config, use_custom_loss):
@@ -44,9 +47,15 @@ def load_trained_model(config, use_custom_loss):
     dummy = tf.zeros((1, config.n_bins))
     _ = vae(dummy)
     
-    # Load weights
-    vae.load_weights(config.model_weights)
-    print(f"✓ Loaded model from {config.model_weights}")
+    # Use the smart loader
+    success = load_model_weights(vae, config.model_weights, prefer_separate=True)
+    
+    if not success:
+        raise ValueError(f"Failed to load model weights from {config.model_weights}")
+    
+    # Verify
+    test_output = vae(dummy, training=False)
+    print(f"✓ Model verified, output shape: {test_output.shape}")
     
     return vae
 

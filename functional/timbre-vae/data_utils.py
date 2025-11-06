@@ -111,20 +111,121 @@ def setup_workspace(config):
     return workdir
 
 
-def create_training_callbacks(config, model_dir, log_dir):
+def save_model_weights(vae, model_dir, save_separate=True):
+    """Save VAE model weights.
+    
+    Args:
+        vae: Trained VAE model
+        model_dir: Directory to save weights
+        save_separate: If True, save encoder/decoder separately for easier loading
+    """
+    import tensorflow as tf
+    
+    model_dir = Path(model_dir)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save full model weights (for backward compatibility)
+    full_model_path = model_dir / 'mymodel_last.weights.h5'
+    print(f"Saving full model weights to: {full_model_path}")
+    vae.save_weights(str(full_model_path))
+    
+    if save_separate:
+        # Save encoder and decoder separately (cleaner loading)
+        encoder_path = model_dir / 'encoder.weights.h5'
+        decoder_path = model_dir / 'decoder.weights.h5'
+        
+        print(f"Saving encoder weights to: {encoder_path}")
+        vae.encoder.save_weights(str(encoder_path))
+        
+        print(f"Saving decoder weights to: {decoder_path}")
+        vae.decoder.save_weights(str(decoder_path))
+        
+        print("✓ Saved separate encoder/decoder weights for easier loading")
+
+
+def load_model_weights(vae, weights_path, prefer_separate=True):
+    """Load VAE model weights with automatic fallback.
+    
+    Args:
+        vae: VAE model instance to load weights into
+        weights_path: Path to weights file or model directory
+        prefer_separate: If True, try to load separate encoder/decoder files first
+        
+    Returns:
+        bool: True if loading succeeded
+    """
+    import tensorflow as tf
+    
+    weights_path = Path(weights_path)
+    
+    # If it's a directory, look for weights files
+    if weights_path.is_dir():
+        model_dir = weights_path
+        full_weights = model_dir / 'mymodel_last.weights.h5'
+        encoder_weights = model_dir / 'encoder.weights.h5'
+        decoder_weights = model_dir / 'decoder.weights.h5'
+    else:
+        # It's a file path
+        model_dir = weights_path.parent
+        full_weights = weights_path
+        encoder_weights = model_dir / 'encoder.weights.h5'
+        decoder_weights = model_dir / 'decoder.weights.h5'
+    
+    # Strategy 1: Try separate encoder/decoder files (cleanest)
+    if prefer_separate and encoder_weights.exists() and decoder_weights.exists():
+        try:
+            print(f"Loading encoder from: {encoder_weights}")
+            vae.encoder.load_weights(str(encoder_weights))
+            
+            print(f"Loading decoder from: {decoder_weights}")
+            vae.decoder.load_weights(str(decoder_weights))
+            
+            print("✓ Loaded separate encoder/decoder weights")
+            return True
+        except Exception as e:
+            print(f"⚠️  Failed to load separate weights: {e}")
+    
+    # Strategy 2: Try full model weights (standard)
+    if full_weights.exists():
+        try:
+            print(f"Loading full model weights from: {full_weights}")
+            vae.load_weights(str(full_weights))
+            print("✓ Loaded full model weights")
+            return True
+        except Exception as e:
+            print(f"⚠️  Failed to load full model weights: {e}")
+    
+    print(f"❌ Could not load weights from: {weights_path}")
+    return False
+
+
+def create_training_callbacks(config, model_dir, log_dir, vae=None):
     """Create training callbacks.
     
     Args:
         config: TrainingConfig object
         model_dir: Model save directory
         log_dir: Tensorboard log directory
+        vae: VAE model (optional, for custom save callback)
         
     Returns:
         list: List of Keras callbacks
     """
     import tensorflow as tf
     
+    model_dir = Path(model_dir)
     modelpath = model_dir / 'mymodel_last.weights.h5'
+    
+    # Custom callback to save encoder/decoder separately
+    class SaveSeparateWeights(tf.keras.callbacks.Callback):
+        def __init__(self, vae, model_dir):
+            super().__init__()
+            self.vae = vae
+            self.model_dir = Path(model_dir)
+        
+        def on_epoch_end(self, epoch, logs=None):
+            """Save separate weights at end of each epoch."""
+            save_model_weights(self.vae, self.model_dir, save_separate=True)
     
     callbacks = [
         tf.keras.callbacks.ModelCheckpoint(
@@ -145,6 +246,10 @@ def create_training_callbacks(config, model_dir, log_dir):
             histogram_freq=1
         )
     ]
+    
+    # Add custom callback for separate weight saving
+    if vae is not None:
+        callbacks.append(SaveSeparateWeights(vae, model_dir))
     
     return callbacks
 
