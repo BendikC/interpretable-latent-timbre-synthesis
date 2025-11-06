@@ -123,10 +123,14 @@ class AudioFeatureVAE(tf.keras.Model):
                 tf.keras.losses.mse(data, reconstruction)
             )
             
-            # KL divergence loss
-            kl_loss = 0.5 * tf.reduce_mean(
-                z_log_var - tf.square(z_mean) - tf.exp(z_log_var) + 1
+            # KL divergence loss - CORRECT FORMULA
+            # KL = -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
+            kl_loss = -0.5 * tf.reduce_mean(
+                tf.reduce_sum(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var), axis=1)
             )
+            
+            # Clip to prevent explosion
+            kl_loss = tf.clip_by_value(kl_loss, 0.0, 1000.0)
 
             # Audio feature losses using pure TensorFlow (DIFFERENTIABLE!)
             input_centroid = compute_spectral_centroid_tf(data)
@@ -198,10 +202,6 @@ def create_vae_model(config):
         n_units=config.n_units,
         output_activation=config.VAE_output_activation
     )
-
-    # NEW: Get disentanglement parameters from config
-    centroid_dim = getattr(config, 'centroid_dim', 0)  # Default to first dimension
-    disentangle_weight = getattr(config, 'disentangle_weight', 1.0)
     
     # Create VAE
     vae = AudioFeatureVAE(
@@ -210,8 +210,8 @@ def create_vae_model(config):
         kl_beta=config.kl_beta,
         attack_time_weight=config.attack_time_weight,
         spectral_centroid_weight=config.spectral_centroid_weight,
-        disentangle_weight=disentangle_weight,
-        centroid_dim=centroid_dim
+        disentangle_weight=config.disentangle_weight,
+        centroid_dim=config.centroid_dim
     )
 
     # Build the model by calling it with dummy data
@@ -237,9 +237,9 @@ def create_simple_vae_model(config):
             z_mean, z_log_var, z = self.encoder_model(inputs)
             reconstruction = self.decoder_model(z)
             
-            # Add KL loss
-            kl_loss = 0.5 * tf.reduce_mean(
-                z_log_var - tf.square(z_mean) - tf.exp(z_log_var) + 1
+            # Add KL loss - CORRECT FORMULA
+            kl_loss = -0.5 * tf.reduce_mean(
+                tf.reduce_sum(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var), axis=1)
             )
             self.add_loss(self.kl_beta * kl_loss)
             

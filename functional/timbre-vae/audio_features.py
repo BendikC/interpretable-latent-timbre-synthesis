@@ -4,9 +4,13 @@
 import numpy as np
 import tensorflow as tf
 
-def compute_spectral_centroid_tf(cqt_magnitude, fmin=32.7, bins_per_octave=48):
+def compute_spectral_centroid_tf(cqt_magnitude, fmin=32.7, bins_per_octave=24):
     """Compute spectral centroid using proper frequency mapping."""
-    # first we get the number of bins, and we define the indices as floats
+
+    # first we ensure non-negative and add small epsilon
+    cqt_magnitude = tf.abs(cqt_magnitude) + 1e-8
+
+    # we get the number of bins, and we define the indices as floats
     n_bins = tf.shape(cqt_magnitude)[1]
     bin_indices = tf.cast(tf.range(n_bins), tf.float32)
     
@@ -27,9 +31,18 @@ def compute_spectral_centroid_tf(cqt_magnitude, fmin=32.7, bins_per_octave=48):
     # spectral centroid = weighted frequency sum / total magnitude
     centroid_hz = weighted_freq / (total_magnitude + 1e-8)
     
-    # we normalize to [0, 1] based on fmin and fmax
+    # Clamp centroid to valid frequency range before log
     fmax = fmin * tf.pow(2.0, tf.cast(n_bins, tf.float32) / bins_per_octave)
-    centroid_normalized = tf.math.log(centroid_hz / fmin) / tf.math.log(fmax / fmin)
+    centroid_hz = tf.clip_by_value(centroid_hz, fmin, fmax)
+    
+    # Normalize to [0, 1] using logarithmic scale
+    # log(centroid/fmin) / log(fmax/fmin)
+    log_centroid = tf.math.log(centroid_hz / fmin + 1e-8)
+    log_range = tf.math.log(fmax / fmin + 1e-8)
+    centroid_normalized = log_centroid / log_range
+    
+    # Final clamp to [0, 1] (safety net)
+    centroid_normalized = tf.clip_by_value(centroid_normalized, 0.0, 1.0)
     
     return centroid_normalized
 
