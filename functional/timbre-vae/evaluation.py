@@ -9,7 +9,7 @@ import tensorflow as tf
 import soundfile as sf
 
 
-def generate_audio_examples(config, workdir, vae):
+def generate_audio_examples(config, workdir, vae, no_of_examples=30):
     """Generate audio examples from trained model.
     
     Args:
@@ -30,6 +30,10 @@ def generate_audio_examples(config, workdir, vae):
     for f in os.listdir(config.my_audio):
         if not f.endswith('.wav'):  # Skip non-audio files
             continue
+
+        if no_of_examples <= 0:
+            break
+        no_of_examples -= 1
             
         print(f"Examples for {os.path.splitext(f)[0]}") 
         file_path = config.my_audio / f 
