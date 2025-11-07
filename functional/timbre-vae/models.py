@@ -124,45 +124,55 @@ class AudioFeatureVAE(tf.keras.Model):
             )
             
             # KL divergence loss - CORRECT FORMULA
-            # KL = -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
             kl_loss = -0.5 * tf.reduce_mean(
                 tf.reduce_sum(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var), axis=1)
             )
-            
             # Clip to prevent explosion
-            kl_loss = tf.clip_by_value(kl_loss, 0.0, 1000.0)
+            kl_loss = tf.clip_by_value(kl_loss, 0.0, 100.0)  # Reduced from 1000
 
-            # Audio feature losses using pure TensorFlow (DIFFERENTIABLE!)
-            input_centroid = compute_spectral_centroid_tf(data)
-            output_centroid = compute_spectral_centroid_tf(reconstruction)
-            centroid_loss = tf.reduce_mean(tf.square(input_centroid - output_centroid))
+            # Initialize auxiliary losses
+            centroid_loss = tf.constant(0.0)
+            disentangle_loss = tf.constant(0.0)
             
-            # IMPROVED: Disentanglement loss with better scaling
-            z_centroid_dim = z[:, self.centroid_dim:self.centroid_dim+1]
+            # Only compute if weight > 0
+            if self.spectral_centroid_weight > 0:
+                input_centroid = compute_spectral_centroid_tf(data)
+                output_centroid = compute_spectral_centroid_tf(reconstruction)
+                centroid_loss = tf.reduce_mean(tf.square(input_centroid - output_centroid))
+                # Clip centroid loss
+                centroid_loss = tf.clip_by_value(centroid_loss, 0.0, 1.0)
+                tf.debugging.check_numerics(centroid_loss, "centroid_loss")
             
-            # Use sigmoid instead of tanh for better stability
-            # Sigmoid naturally maps to [0, 1]
-            predicted_centroid = tf.nn.sigmoid(z_centroid_dim)
-            predicted_centroid = tf.squeeze(predicted_centroid, axis=1)
-            
-            # Loss with stability epsilon
-            disentangle_loss = tf.reduce_mean(
-                tf.square(predicted_centroid - input_centroid) + 1e-8
-            )
+            if self.disentangle_weight > 0:
+                input_centroid = compute_spectral_centroid_tf(data)
+                z_centroid_dim = z[:, self.centroid_dim:self.centroid_dim+1]
+                predicted_centroid = tf.nn.sigmoid(z_centroid_dim)
+                predicted_centroid = tf.squeeze(predicted_centroid, axis=1)
+                disentangle_loss = tf.reduce_mean(
+                    tf.square(predicted_centroid - input_centroid)
+                )
+                # Clip disentangle loss
+                disentangle_loss = tf.clip_by_value(disentangle_loss, 0.0, 1.0)
+                tf.debugging.check_numerics(disentangle_loss, "disentangle_loss")
 
+            # Check main losses
             tf.debugging.check_numerics(reconstruction_loss, "reconstruction_loss")
             tf.debugging.check_numerics(kl_loss, "kl_loss")
-            tf.debugging.check_numerics(centroid_loss, "centroid_loss")
-            tf.debugging.check_numerics(disentangle_loss, "disentangle_loss")
             
             # Total loss
-            total_loss = (reconstruction_loss + 
-                         self.kl_beta * kl_loss + 
-                         self.spectral_centroid_weight * centroid_loss + 
-                         self.disentangle_weight * disentangle_loss)
+            total_loss = (
+                reconstruction_loss + 
+                self.kl_beta * kl_loss + 
+                self.spectral_centroid_weight * centroid_loss + 
+                self.disentangle_weight * disentangle_loss
+            )
         
-        # Compute gradients and update weights (now this will work!)
+        # Compute gradients with clipping
         grads = tape.gradient(total_loss, self.trainable_weights)
+        
+        # Clip gradients to prevent explosion
+        grads = [tf.clip_by_norm(g, 1.0) if g is not None else None for g in grads]
+        
         self.optimizer.apply_gradients(zip(grads, self.trainable_weights))
         
         # Update metrics
