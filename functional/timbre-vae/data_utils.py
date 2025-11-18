@@ -4,6 +4,7 @@
 import numpy as np
 import os
 from pathlib import Path
+from models import AudioFeatureVAE, KLAnnealingCallback
 
 def check_gpu_availability():
     """Check if GPU is available and print device information.
@@ -250,6 +251,11 @@ def create_training_callbacks(config, model_dir, log_dir, vae=None):
     # Add custom callback for separate weight saving
     if vae is not None:
         callbacks.append(SaveSeparateWeights(vae, model_dir))
+
+    if vae is not None and isinstance(vae, AudioFeatureVAE):
+        kl_callback = KLAnnealingCallback(vae)
+        callbacks.append(kl_callback)
+        print("✓ Added KL annealing callback")
     
     return callbacks
 

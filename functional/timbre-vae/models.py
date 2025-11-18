@@ -6,6 +6,21 @@ from tensorflow.keras import layers
 from tensorflow.keras import backend as K
 from audio_features import compute_features_from_cqt_batch, compute_attack_time_tf, compute_spectral_centroid_tf
 
+# In models.py, add this callback class:
+
+class KLAnnealingCallback(tf.keras.callbacks.Callback):
+    """Callback to update KL beta during training."""
+    
+    def __init__(self, vae_model):
+        super().__init__()
+        self.vae_model = vae_model
+    
+    def on_epoch_begin(self, epoch, logs=None):
+        """Update the VAE's current epoch."""
+        self.vae_model.current_epoch.assign(epoch)
+        current_beta = self.vae_model.get_current_kl_beta()
+        print(f"\nEpoch {epoch}: KL beta = {current_beta:.6f}")
+
 
 class Sampling(layers.Layer):
     """Sampling layer for VAE reparameterization trick."""
@@ -62,25 +77,30 @@ def build_decoder(latent_dim, output_dim, n_units, output_activation='sigmoid'):
 class AudioFeatureVAE(tf.keras.Model):
     """VAE with audio feature preservation losses."""
     
-    def __init__(self, encoder, decoder, kl_beta=1.0, 
+    def __init__(self, encoder, decoder, kl_beta=0.001, 
+                 kl_beta_start=0.0, kl_beta_max=0.001, kl_anneal_epochs=50,
                  attack_time_weight=0.1, spectral_centroid_weight=0.1,
                  centroid_dim=0, disentangle_weight=1.0, **kwargs):
         super(AudioFeatureVAE, self).__init__(**kwargs)
         self.encoder = encoder
         self.decoder = decoder
-        self.kl_beta = kl_beta
+        self.kl_beta_max = kl_beta_max
+        self.kl_beta_start = kl_beta_start
+        self.kl_anneal_epochs = kl_anneal_epochs
+        self.current_epoch = tf.Variable(0, trainable=False, dtype=tf.int32)
+        
         self.attack_time_weight = attack_time_weight
         self.spectral_centroid_weight = spectral_centroid_weight
         self.sampling_layer = Sampling()
 
-        self.centroid_dim = centroid_dim  # Which latent dimension controls centroid
+        self.centroid_dim = centroid_dim
         self.disentangle_weight = disentangle_weight
         
         # Metrics trackers
-        self.total_loss_tracker = tf.keras.metrics.Mean(name="total_loss")
+        self.total_loss_tracker = tf.keras.metrics.Mean(name="loss")
         self.reconstruction_loss_tracker = tf.keras.metrics.Mean(name="reconstruction_loss")
         self.kl_loss_tracker = tf.keras.metrics.Mean(name="kl_loss")
-        self.attack_loss_tracker = tf.keras.metrics.Mean(name="attack_loss")
+        self.kl_beta_tracker = tf.keras.metrics.Mean(name="kl_beta")
         self.centroid_loss_tracker = tf.keras.metrics.Mean(name="centroid_loss")
         self.disentangle_loss_tracker = tf.keras.metrics.Mean(name="disentangle_loss")
 
@@ -90,10 +110,25 @@ class AudioFeatureVAE(tf.keras.Model):
             self.total_loss_tracker,
             self.reconstruction_loss_tracker,
             self.kl_loss_tracker,
-            self.attack_loss_tracker,
+            self.kl_beta_tracker,
             self.centroid_loss_tracker,
             self.disentangle_loss_tracker,
         ]
+    
+    def get_current_kl_beta(self):
+        """Compute current KL beta with linear annealing."""
+        epoch = tf.cast(self.current_epoch, tf.float32)
+        anneal_epochs = tf.cast(self.kl_anneal_epochs, tf.float32)
+        
+        # Linear annealing from kl_beta_start to kl_beta_max
+        progress = tf.minimum(epoch / anneal_epochs, 1.0)
+        current_beta = self.kl_beta_start + (self.kl_beta_max - self.kl_beta_start) * progress
+        
+        return current_beta
+    
+    def on_epoch_begin(self, epoch, logs=None):
+        """Update epoch counter."""
+        self.current_epoch.assign(epoch)
 
     def call(self, inputs, training=None):
         """Forward pass through the VAE."""
@@ -112,6 +147,9 @@ class AudioFeatureVAE(tf.keras.Model):
 
     def train_step(self, data):
         """Custom training step with audio feature losses."""
+        # Get current KL beta
+        kl_beta = self.get_current_kl_beta()
+        
         with tf.GradientTape() as tape:
             # Forward pass
             z_mean, z_log_var = self.encoder(data)
@@ -123,54 +161,44 @@ class AudioFeatureVAE(tf.keras.Model):
                 tf.keras.losses.mse(data, reconstruction)
             )
             
-            # KL divergence loss - CORRECT FORMULA
+            # KL divergence loss
             kl_loss = -0.5 * tf.reduce_mean(
                 tf.reduce_sum(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var), axis=1)
             )
-            # Clip to prevent explosion
-            kl_loss = tf.clip_by_value(kl_loss, 0.0, 100.0)  # Reduced from 1000
+            kl_loss = tf.clip_by_value(kl_loss, 0.0, 100.0)
 
             # Initialize auxiliary losses
             centroid_loss = tf.constant(0.0)
             disentangle_loss = tf.constant(0.0)
             
-            # Only compute if weight > 0
-            if self.spectral_centroid_weight > 0:
+            # Compute centroid only if needed
+            if self.spectral_centroid_weight > 0 or self.disentangle_weight > 0:
                 input_centroid = compute_spectral_centroid_tf(data)
-                output_centroid = compute_spectral_centroid_tf(reconstruction)
-                centroid_loss = tf.reduce_mean(tf.square(input_centroid - output_centroid))
-                # Clip centroid loss
-                centroid_loss = tf.clip_by_value(centroid_loss, 0.0, 1.0)
-                tf.debugging.check_numerics(centroid_loss, "centroid_loss")
+                
+                if self.spectral_centroid_weight > 0:
+                    output_centroid = compute_spectral_centroid_tf(reconstruction)
+                    centroid_loss = tf.reduce_mean(tf.square(input_centroid - output_centroid))
+                    centroid_loss = tf.clip_by_value(centroid_loss, 0.0, 1.0)
+                
+                if self.disentangle_weight > 0:
+                    z_centroid_dim = z[:, self.centroid_dim:self.centroid_dim+1]
+                    predicted_centroid = tf.nn.sigmoid(z_centroid_dim)
+                    predicted_centroid = tf.squeeze(predicted_centroid, axis=1)
+                    disentangle_loss = tf.reduce_mean(
+                        tf.square(predicted_centroid - input_centroid)
+                    )
+                    disentangle_loss = tf.clip_by_value(disentangle_loss, 0.0, 1.0)
             
-            if self.disentangle_weight > 0:
-                input_centroid = compute_spectral_centroid_tf(data)
-                z_centroid_dim = z[:, self.centroid_dim:self.centroid_dim+1]
-                predicted_centroid = tf.nn.sigmoid(z_centroid_dim)
-                predicted_centroid = tf.squeeze(predicted_centroid, axis=1)
-                disentangle_loss = tf.reduce_mean(
-                    tf.square(predicted_centroid - input_centroid)
-                )
-                # Clip disentangle loss
-                disentangle_loss = tf.clip_by_value(disentangle_loss, 0.0, 1.0)
-                tf.debugging.check_numerics(disentangle_loss, "disentangle_loss")
-
-            # Check main losses
-            tf.debugging.check_numerics(reconstruction_loss, "reconstruction_loss")
-            tf.debugging.check_numerics(kl_loss, "kl_loss")
-            
-            # Total loss
+            # Total loss with annealed KL beta
             total_loss = (
                 reconstruction_loss + 
-                self.kl_beta * kl_loss + 
+                kl_beta * kl_loss +  # ← Using annealed beta
                 self.spectral_centroid_weight * centroid_loss + 
                 self.disentangle_weight * disentangle_loss
             )
         
         # Compute gradients with clipping
         grads = tape.gradient(total_loss, self.trainable_weights)
-        
-        # Clip gradients to prevent explosion
         grads = [tf.clip_by_norm(g, 1.0) if g is not None else None for g in grads]
         
         self.optimizer.apply_gradients(zip(grads, self.trainable_weights))
@@ -179,6 +207,7 @@ class AudioFeatureVAE(tf.keras.Model):
         self.total_loss_tracker.update_state(total_loss)
         self.reconstruction_loss_tracker.update_state(reconstruction_loss)
         self.kl_loss_tracker.update_state(kl_loss)
+        self.kl_beta_tracker.update_state(kl_beta)
         self.centroid_loss_tracker.update_state(centroid_loss)
         self.disentangle_loss_tracker.update_state(disentangle_loss)
         
@@ -186,20 +215,13 @@ class AudioFeatureVAE(tf.keras.Model):
             "loss": self.total_loss_tracker.result(),
             "reconstruction_loss": self.reconstruction_loss_tracker.result(),
             "kl_loss": self.kl_loss_tracker.result(),
+            "kl_beta": self.kl_beta_tracker.result(),  # Track annealing
             "centroid_loss": self.centroid_loss_tracker.result(),
             "disentangle_loss": self.disentangle_loss_tracker.result(),
         }
 
 def create_vae_model(config):
-    """Factory function to create VAE model from config.
-    
-    Args:
-        config: TrainingConfig object
-        
-    Returns:
-        AudioFeatureVAE: Configured VAE model
-    """
-    # Build encoder and decoder
+    """Factory function to create VAE model from config."""
     encoder = build_encoder(
         input_dim=config.n_bins,
         latent_dim=config.latent_dim,
@@ -213,18 +235,22 @@ def create_vae_model(config):
         output_activation=config.VAE_output_activation
     )
     
-    # Create VAE
+    # Get annealing params from config (with defaults)
+    kl_beta_start = getattr(config, 'kl_beta_start', 0.0)
+    kl_anneal_epochs = getattr(config, 'kl_anneal_epochs', 50)
+    
     vae = AudioFeatureVAE(
         encoder=encoder,
         decoder=decoder,
-        kl_beta=config.kl_beta,
+        kl_beta_start=kl_beta_start,
+        kl_beta_max=config.kl_beta,  # Final target
+        kl_anneal_epochs=kl_anneal_epochs,
         attack_time_weight=config.attack_time_weight,
         spectral_centroid_weight=config.spectral_centroid_weight,
         disentangle_weight=config.disentangle_weight,
         centroid_dim=config.centroid_dim
     )
 
-    # Build the model by calling it with dummy data
     dummy_input = tf.zeros((1, config.n_bins))
     _ = vae(dummy_input)
     
