@@ -4,6 +4,7 @@ from __future__ import absolute_import, division, print_function, unicode_litera
 import tensorflow as tf
 from tensorflow.keras import layers
 tf.keras.backend.clear_session()  # For easy reset of notebook state.
+import soundfile as sf
 
 import random
 import numpy as np
@@ -167,7 +168,7 @@ if not continue_training:
   z_mean = layers.Dense(latent_dim, name='z_mean')(x)
   z_log_var = layers.Dense(latent_dim, name='z_log_var')(x)
   z = Sampling()((z_mean, z_log_var))
-  encoder = tf.keras.Model(inputs=original_inputs, outputs=z, name='encoder')
+  encoder = tf.keras.Model(inputs=original_inputs, outputs=[z_mean, z_log_var, z], name='encoder')
   encoder.summary()
 
   # Define decoder model.
@@ -177,16 +178,94 @@ if not continue_training:
   decoder = tf.keras.Model(inputs=latent_inputs, outputs=outputs, name='decoder')
   decoder.summary()
 
-  outputs = decoder(z)
-  # Define VAE model.
-  vae = tf.keras.Model(inputs=original_inputs, outputs=outputs, name='vae')
-  vae.summary()
+  # Define VAE model with custom loss
+  class VAE(tf.keras.Model):
+    def __init__(self, encoder, decoder, kl_beta=1.0, **kwargs):
+      super(VAE, self).__init__(**kwargs)
+      self.encoder = encoder
+      self.decoder = decoder
+      self.kl_beta = kl_beta
+      self.total_loss_tracker = tf.keras.metrics.Mean(name="total_loss")
+      self.reconstruction_loss_tracker = tf.keras.metrics.Mean(name="reconstruction_loss")
+      self.kl_loss_tracker = tf.keras.metrics.Mean(name="kl_loss")
 
+    @property
+    def metrics(self):
+      return [
+        self.total_loss_tracker,
+        self.reconstruction_loss_tracker,
+        self.kl_loss_tracker,
+      ]
+
+    def call(self, inputs):
+      z_mean, z_log_var, z = self.encoder(inputs)
+      reconstruction = self.decoder(z)
+      return reconstruction
+
+    def train_step(self, data):
+      with tf.GradientTape() as tape:
+        z_mean, z_log_var, z = self.encoder(data)
+        reconstruction = self.decoder(z)
+        
+        # Reconstruction loss
+        reconstruction_loss = tf.reduce_mean(
+          tf.keras.losses.mse(data, reconstruction)
+        )
+        
+        # KL divergence loss
+        kl_loss = -0.5 * tf.reduce_mean(
+          z_log_var - tf.square(z_mean) - tf.exp(z_log_var) + 1
+        )
+        
+        # Total loss
+        total_loss = reconstruction_loss + self.kl_beta * kl_loss
+      
+      # Compute gradients
+      grads = tape.gradient(total_loss, self.trainable_weights)
+      self.optimizer.apply_gradients(zip(grads, self.trainable_weights))
+      
+      # Update metrics
+      self.total_loss_tracker.update_state(total_loss)
+      self.reconstruction_loss_tracker.update_state(reconstruction_loss)
+      self.kl_loss_tracker.update_state(kl_loss)
+      
+      return {
+        "loss": self.total_loss_tracker.result(),
+        "reconstruction_loss": self.reconstruction_loss_tracker.result(),
+        "kl_loss": self.kl_loss_tracker.result(),
+      }
+
+    def test_step(self, data):
+      z_mean, z_log_var, z = self.encoder(data, training=False)
+      reconstruction = self.decoder(z, training=False)
+      
+      reconstruction_loss = tf.reduce_mean(
+        tf.keras.losses.mse(data, reconstruction)
+      )
+      kl_loss = -0.5 * tf.reduce_mean(
+        z_log_var - tf.square(z_mean) - tf.exp(z_log_var) + 1
+      )
+      total_loss = reconstruction_loss + self.kl_beta * kl_loss
+      
+      self.total_loss_tracker.update_state(total_loss)
+      self.reconstruction_loss_tracker.update_state(reconstruction_loss)
+      self.kl_loss_tracker.update_state(kl_loss)
+      
+      return {
+        "loss": self.total_loss_tracker.result(),
+        "reconstruction_loss": self.reconstruction_loss_tracker.result(),
+        "kl_loss": self.kl_loss_tracker.result(),
+      }
+
+  # Create VAE instance
+  vae = VAE(encoder, decoder, kl_beta=kl_beta)
+  vae.build(input_shape=(None, original_dim))
+  vae.summary()
 
   if plot_model:
     tf.keras.utils.plot_model(
-      vae,
-      to_file= workdir.joinpath('model_vae.jpg'),
+      encoder,
+      to_file= workdir.joinpath('model_encoder.jpg'),
       show_shapes=True,
       show_layer_names=True,
       rankdir='TB',
@@ -195,59 +274,36 @@ if not continue_training:
     )
 
     tf.keras.utils.plot_model(
-        encoder,
-        to_file= workdir.joinpath('model_encoder.jpg'),
-        show_shapes=True,
-        show_layer_names=True,
-        rankdir='TB',
-        expand_nested=True,
-        dpi=300
+      decoder,
+      to_file=workdir.joinpath('model_decoder.jpg'),
+      show_shapes=True,
+      show_layer_names=True,
+      rankdir='TB',
+      expand_nested=True,
+      dpi=300
     )
-
-    tf.keras.utils.plot_model(
-        decoder,
-        to_file=workdir.joinpath('model_decoder.jpg'),
-        show_shapes=True,
-        show_layer_names=True,
-        rankdir='TB',
-        expand_nested=True,
-        dpi=300
-    )
-
-
-  # Add KL divergence regularization loss.
-  kl_loss = - kl_beta * tf.reduce_mean(
-      z_log_var - tf.square(z_mean) - tf.exp(z_log_var) + 1)
-  vae.add_loss(kl_loss)
 
   if learning_schedule:
-    learning_rate = tf.keras.optimizers.schedules.ExponentialDecay(
+    learning_rate_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
       learning_rate*100,
       decay_steps=int(epochs*0.8),
       decay_rate=0.96,
       staircase=True)
+    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate_schedule, beta_1=adam_beta_1, beta_2=adam_beta_2)
+  else:
+    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate, beta_1=adam_beta_1, beta_2=adam_beta_2)
 
-
-  optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate, beta_1=adam_beta_1, beta_2=adam_beta_2)
-
-  vae.compile(optimizer, 
-    loss=tf.keras.losses.MeanSquaredError())
+  vae.compile(optimizer=optimizer)
 
 else: 
-  #load the model
-  my_model_path = workdir.joinpath('model','mymodel_last.h5')
-
-  with tf.keras.utils.CustomObjectScope({'Sampling': Sampling}):
-    vae = tf.keras.models.load_model(my_model_path)
-  vae.summary()
-
-  # create Encoder model
-  encoder = tf.keras.Model(inputs = vae.input, outputs = [vae.get_layer("z_mean").output, vae.get_layer("z_log_var").output], name='encoder')
-  encoder.summary()
-
-  # create Decoder model
-  decoder = tf.keras.Model(inputs = vae.get_layer('decoder').input, outputs = vae.get_layer('decoder').output, name='decoder')
-  decoder.summary()
+  # Load the model - this part needs updating too
+  print("Loading existing model...")
+  my_model_path = workdir / 'model' / 'mymodel_last.h5'
+  
+  # For now, you'll need to recreate and load weights
+  print("⚠️  Note: Loading saved VAE not yet implemented for custom model")
+  print("   Please retrain from scratch or implement custom loading")
+  sys.exit(1)
 
 modelpath = model_dir.joinpath('mymodel_last.h5')
 
@@ -274,7 +330,7 @@ callbacks = [
       histogram_freq=1)
 ]
 
-history = vae.fit(training_array, training_array, epochs=epochs, batch_size=batch_size, callbacks=callbacks)
+history = vae.fit(training_array, epochs=epochs, batch_size=batch_size, callbacks=callbacks)
 
 print('\nhistory dict:', history.history)
 
@@ -328,14 +384,12 @@ for f in os.listdir(my_audio):
   if normalize_examples:
     output_inv_32 = librosa.util.normalize(output_inv_32)
   print("Saving audio files...")
-  my_audio_out_fold = my_examples_folder.joinpath(os.path.splitext(f)[0])
-  os.makedirs(my_audio_out_fold,exist_ok=True)
-  librosa.output.write_wav(my_audio_out_fold.joinpath('original.wav'),
-                           s, sample_rate)
-  librosa.output.write_wav(my_audio_out_fold.joinpath('original-icqt+gL.wav'),
-                           y_inv_32, sample_rate)
-  librosa.output.write_wav(my_audio_out_fold.joinpath('VAE-output+gL.wav'),
-                           output_inv_32, sample_rate)
+  my_audio_out_fold = my_examples_folder / os.path.splitext(f)[0]
+  os.makedirs(my_audio_out_fold, exist_ok=True)
+
+  sf.write(my_audio_out_fold / 'original.wav', s, sample_rate)
+  sf.write(my_audio_out_fold / 'original-icqt+gL.wav', y_inv_32, sample_rate)
+  sf.write(my_audio_out_fold / 'VAE-output+gL.wav', output_inv_32, sample_rate)
 
 #Generate a plot for loss 
 print("Generating loss plot...")
