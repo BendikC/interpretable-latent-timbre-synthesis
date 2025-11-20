@@ -79,6 +79,10 @@ n_units = config['VAE'].getint('n_units')
 kl_beta = config['VAE'].getfloat('kl_beta')
 batch_normalization = config['VAE'].getboolean('batch_norm')
 VAE_output_activation = config['VAE'].get('output_activation')
+
+# Spectral centroid configs
+spectral_centroid_weight = config['VAE'].getfloat('spectral_centroid_weight', fallback=0.0)
+
 #etc
 example_length = config['extra'].getint('example_length')
 normalize_examples = config['extra'].getboolean('normalize_examples')
@@ -142,6 +146,49 @@ with open(config_path, 'w') as configfile:
 if buffer_size_dataset:
   train_buf = len(training_array)
 
+# Spectral centroid computation function
+def compute_spectral_centroid_tf(cqt_magnitude, fmin=32.7, bins_per_octave=48):
+    """Compute spectral centroid using proper frequency mapping."""
+
+    # first we ensure non-negative and add small epsilon
+    cqt_magnitude = tf.abs(cqt_magnitude) + 1e-8
+
+    # we get the number of bins, and we define the indices as floats
+    n_bins = tf.shape(cqt_magnitude)[1]
+    bin_indices = tf.cast(tf.range(n_bins), tf.float32)
+    
+    # cqt bins are logarithmically spaced
+    # this means that frequency for each bin is:
+    # f = fmin * 2^(bin_index / bins_per_octave)
+    frequencies = fmin * tf.pow(2.0, bin_indices / bins_per_octave)
+
+    # we expand the dims to match the batch size
+    frequencies = tf.expand_dims(frequencies, 0)
+    
+    # we compute the sum of frequency * magnitude
+    weighted_freq = tf.reduce_sum(cqt_magnitude * frequencies, axis=1)
+
+    # then we compute the total magnitude
+    total_magnitude = tf.reduce_sum(cqt_magnitude, axis=1)
+
+    # spectral centroid = weighted frequency sum / total magnitude
+    centroid_hz = weighted_freq / (total_magnitude + 1e-8)
+    
+    # Clamp centroid to valid frequency range before log
+    fmax = fmin * tf.pow(2.0, tf.cast(n_bins, tf.float32) / bins_per_octave)
+    centroid_hz = tf.clip_by_value(centroid_hz, fmin, fmax)
+    
+    # Normalize to [0, 1] using logarithmic scale
+    # log(centroid/fmin) / log(fmax/fmin)
+    log_centroid = tf.math.log(centroid_hz / fmin + 1e-8)
+    log_range = tf.math.log(fmax / fmin + 1e-8)
+    centroid_normalized = log_centroid / log_range
+    
+    # Final clamp to [0, 1] (safety net)
+    centroid_normalized = tf.clip_by_value(centroid_normalized, 0.0, 1.0)
+    
+    return centroid_normalized
+
 #Define Sampling Layer
 class Sampling(layers.Layer):
   """Uses (z_mean, z_log_var) to sample z, the vector encoding a digit."""
@@ -178,16 +225,22 @@ if not continue_training:
   decoder = tf.keras.Model(inputs=latent_inputs, outputs=outputs, name='decoder')
   decoder.summary()
 
-  # Define VAE model with custom loss
+  # Define VAE model with custom loss including spectral centroid
   class VAE(tf.keras.Model):
-    def __init__(self, encoder, decoder, kl_beta=1.0, **kwargs):
+    def __init__(self, encoder, decoder, kl_beta=1.0, spectral_centroid_weight=0.0, 
+                 fmin=32.7, bins_per_octave=48, **kwargs):
       super(VAE, self).__init__(**kwargs)
       self.encoder = encoder
       self.decoder = decoder
       self.kl_beta = kl_beta
+      self.spectral_centroid_weight = spectral_centroid_weight
+      self.fmin = fmin
+      self.bins_per_octave = bins_per_octave
+      
       self.total_loss_tracker = tf.keras.metrics.Mean(name="total_loss")
       self.reconstruction_loss_tracker = tf.keras.metrics.Mean(name="reconstruction_loss")
       self.kl_loss_tracker = tf.keras.metrics.Mean(name="kl_loss")
+      self.centroid_loss_tracker = tf.keras.metrics.Mean(name="centroid_loss")
 
     @property
     def metrics(self):
@@ -195,6 +248,7 @@ if not continue_training:
         self.total_loss_tracker,
         self.reconstruction_loss_tracker,
         self.kl_loss_tracker,
+        self.centroid_loss_tracker,
       ]
 
     def call(self, inputs):
@@ -217,8 +271,28 @@ if not continue_training:
           z_log_var - tf.square(z_mean) - tf.exp(z_log_var) + 1
         )
         
+        # Spectral centroid loss
+        centroid_loss = tf.constant(0.0)
+        if self.spectral_centroid_weight > 0:
+          input_centroid = compute_spectral_centroid_tf(
+            data, 
+            fmin=self.fmin, 
+            bins_per_octave=self.bins_per_octave
+          )
+          output_centroid = compute_spectral_centroid_tf(
+            reconstruction, 
+            fmin=self.fmin, 
+            bins_per_octave=self.bins_per_octave
+          )
+          centroid_loss = tf.reduce_mean(tf.square(input_centroid - output_centroid))
+          centroid_loss = tf.clip_by_value(centroid_loss, 0.0, 1.0)
+        
         # Total loss
-        total_loss = reconstruction_loss + self.kl_beta * kl_loss
+        total_loss = (
+          reconstruction_loss + 
+          self.kl_beta * kl_loss +
+          self.spectral_centroid_weight * centroid_loss
+        )
       
       # Compute gradients
       grads = tape.gradient(total_loss, self.trainable_weights)
@@ -228,11 +302,13 @@ if not continue_training:
       self.total_loss_tracker.update_state(total_loss)
       self.reconstruction_loss_tracker.update_state(reconstruction_loss)
       self.kl_loss_tracker.update_state(kl_loss)
+      self.centroid_loss_tracker.update_state(centroid_loss)
       
       return {
         "loss": self.total_loss_tracker.result(),
         "reconstruction_loss": self.reconstruction_loss_tracker.result(),
         "kl_loss": self.kl_loss_tracker.result(),
+        "centroid_loss": self.centroid_loss_tracker.result(),
       }
 
     def test_step(self, data):
@@ -245,22 +321,61 @@ if not continue_training:
       kl_loss = -0.5 * tf.reduce_mean(
         z_log_var - tf.square(z_mean) - tf.exp(z_log_var) + 1
       )
-      total_loss = reconstruction_loss + self.kl_beta * kl_loss
+      
+      centroid_loss = tf.constant(0.0)
+      if self.spectral_centroid_weight > 0:
+        input_centroid = compute_spectral_centroid_tf(
+          data, 
+          fmin=self.fmin, 
+          bins_per_octave=self.bins_per_octave
+        )
+        output_centroid = compute_spectral_centroid_tf(
+          reconstruction, 
+          fmin=self.fmin, 
+          bins_per_octave=self.bins_per_octave
+        )
+        centroid_loss = tf.reduce_mean(tf.square(input_centroid - output_centroid))
+        centroid_loss = tf.clip_by_value(centroid_loss, 0.0, 1.0)
+      
+      total_loss = (
+        reconstruction_loss + 
+        self.kl_beta * kl_loss +
+        self.spectral_centroid_weight * centroid_loss
+      )
       
       self.total_loss_tracker.update_state(total_loss)
       self.reconstruction_loss_tracker.update_state(reconstruction_loss)
       self.kl_loss_tracker.update_state(kl_loss)
+      self.centroid_loss_tracker.update_state(centroid_loss)
       
       return {
         "loss": self.total_loss_tracker.result(),
         "reconstruction_loss": self.reconstruction_loss_tracker.result(),
         "kl_loss": self.kl_loss_tracker.result(),
+        "centroid_loss": self.centroid_loss_tracker.result(),
       }
 
-  # Create VAE instance
-  vae = VAE(encoder, decoder, kl_beta=kl_beta)
+  # Calculate fmin from CQT configuration
+  # Standard MIDI note 0 (C-1) is 8.176 Hz
+  # For typical CQT, fmin = C1 (32.7 Hz) or use config if available
+  fmin = 32.7  # You can make this configurable if needed
+  
+  # Create VAE instance with spectral centroid
+  vae = VAE(
+    encoder, 
+    decoder, 
+    kl_beta=kl_beta, 
+    spectral_centroid_weight=spectral_centroid_weight,
+    fmin=fmin,
+    bins_per_octave=bins_per_octave
+  )
   vae.build(input_shape=(None, original_dim))
   vae.summary()
+  
+  print(f"\n=== VAE Configuration ===")
+  print(f"KL beta: {kl_beta}")
+  print(f"Spectral centroid weight: {spectral_centroid_weight}")
+  print(f"Frequency range: {fmin:.2f} Hz - {fmin * (2 ** num_octaves):.2f} Hz")
 
   if plot_model:
     tf.keras.utils.plot_model(
@@ -359,12 +474,6 @@ for f in os.listdir(my_audio):
   print("Calculating CQT")
   C_complex = librosa.cqt(y=s, sr=fs, hop_length= hop_length, bins_per_octave=bins_per_octave, n_bins=n_bins)
   C = np.abs(C_complex)
-  # Invert using Griffin-Lim
-  #y_inv = librosa.griffinlim_cqt(C, sr=fs, n_iter=n_iter, hop_length=hop_length, bins_per_octave=bins_per_octave)
-  
-  # And invert without estimating phase
-  #y_icqt = librosa.icqt(C, sr=fs, hop_length=hop_length, bins_per_octave=bins_per_octave)
-  #y_icqt_full = librosa.icqt(C_complex, hop_length=hop_length, sr=fs, bins_per_octave=bins_per_octave, , dtype=np.float32)
 
   C_32 = C.astype('float32')
   y_inv_32 = librosa.griffinlim_cqt(C, sr=fs, n_iter=n_iter, hop_length=hop_length, bins_per_octave=bins_per_octave, dtype=np.float32)
@@ -391,14 +500,12 @@ for f in os.listdir(my_audio):
   sf.write(my_audio_out_fold / 'original-icqt+gL.wav', y_inv_32, sample_rate)
   sf.write(my_audio_out_fold / 'VAE-output+gL.wav', output_inv_32, sample_rate)
 
-# Replace the plotting section (around line 349) with:
-
 #Generate plots for losses 
 print("Generating loss plots...")
 history_dict = history.history
 
-# Create figure with subplots
-fig, axes = plt.subplots(3, 1, figsize=(10, 12))
+# Create figure with subplots (now 4 subplots to include centroid)
+fig, axes = plt.subplots(4, 1, figsize=(10, 15))
 
 # Plot 1: Total Loss
 axes[0].plot(history_dict['loss'], linewidth=2, color='blue')
@@ -423,6 +530,14 @@ if 'kl_loss' in history_dict:
     axes[2].set_title('KL Divergence Loss over Training')
     axes[2].grid(True, alpha=0.3)
 
+# Plot 4: Centroid Loss
+if 'centroid_loss' in history_dict:
+    axes[3].plot(history_dict['centroid_loss'], linewidth=2, color='orange')
+    axes[3].set_xlabel('Epochs')
+    axes[3].set_ylabel('Centroid Loss')
+    axes[3].set_title('Spectral Centroid Loss over Training')
+    axes[3].grid(True, alpha=0.3)
+
 plt.tight_layout()
 fig.savefig(workdir.joinpath('my_history_plot.pdf'), dpi=300, bbox_inches='tight')
 print(f"Saved loss plot to: {workdir / 'my_history_plot.pdf'}")
@@ -436,6 +551,9 @@ if 'kl_loss' in history_dict:
     # Scale KL loss by beta for visualization
     kl_scaled = np.array(history_dict['kl_loss']) * kl_beta
     ax.plot(kl_scaled, label=f'KL Loss × β ({kl_beta})', linewidth=2)
+if 'centroid_loss' in history_dict and spectral_centroid_weight > 0:
+    centroid_scaled = np.array(history_dict['centroid_loss']) * spectral_centroid_weight
+    ax.plot(centroid_scaled, label=f'Centroid Loss × weight ({spectral_centroid_weight})', linewidth=2)
 
 ax.set_xlabel('Epochs', fontsize=12)
 ax.set_ylabel('Loss', fontsize=12)
@@ -454,6 +572,9 @@ if 'reconstruction_loss' in history_dict:
 if 'kl_loss' in history_dict:
     print(f"KL Loss: {history_dict['kl_loss'][-1]:.6f}")
     print(f"KL Loss × β: {history_dict['kl_loss'][-1] * kl_beta:.6f}")
+if 'centroid_loss' in history_dict:
+    print(f"Centroid Loss: {history_dict['centroid_loss'][-1]:.6f}")
+    print(f"Centroid Loss × weight: {history_dict['centroid_loss'][-1] * spectral_centroid_weight:.6f}")
 
 plt.close('all')
 
